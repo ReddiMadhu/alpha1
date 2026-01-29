@@ -73,32 +73,25 @@ class Config:
     ROW_EXPLOSION_RISK_THRESHOLD: int = 10
     
     # =============================================================================
-    # LLM SETTINGS - AZURE AI FOUNDRY
+    # LLM SETTINGS - AZURE OPENAI (LANGCHAIN)
     # =============================================================================
     
     # LLM provider
-    LLM_PROVIDER: str = "azure_foundry"
+    LLM_PROVIDER: str = "azure_openai"
     
-    # Model name
-    LLM_MODEL: str = os.getenv("AZURE_FOUNDRY_MODEL", "llama-3.3b")
-    
-    # Azure AI Foundry endpoint
-    AZURE_FOUNDRY_ENDPOINT: Optional[str] = os.getenv("AZURE_FOUNDRY_ENDPOINT")
-    
-    # Azure AI Foundry API key
-    AZURE_FOUNDRY_API_KEY: Optional[str] = os.getenv("AZURE_FOUNDRY_API_KEY")
-    
-    # API version
-    AZURE_FOUNDRY_API_VERSION: str = os.getenv("AZURE_FOUNDRY_API_VERSION", "2024-12-01")
+    # Azure OpenAI credentials
+    AZURE_OPENAI_API_KEY: Optional[str] = os.getenv("AZURE_OPENAI_API_KEY")
+    AZURE_OPENAI_ENDPOINT: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    AZURE_OPENAI_DEPLOYMENT_NAME: Optional[str] = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
     
     # Maximum tokens for LLM response
-    LLM_MAX_TOKENS: int = 500
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "800"))
     
     # Temperature for deterministic output
-    LLM_TEMPERATURE: float = 0.1
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
     
     # Enable LLM validation (set to False to disable LLM entirely)
-    ENABLE_LLM_VALIDATION: bool = True
+    ENABLE_LLM_VALIDATION: bool = os.getenv("ENABLE_LLM_VALIDATION", "true").lower() == "true"
     
     # =============================================================================
     # PERFORMANCE - OPTIMIZED FOR MAX 5 FILES
@@ -160,10 +153,12 @@ class Config:
         
         # Validate LLM settings if enabled
         if cls.ENABLE_LLM_VALIDATION:
-            if not cls.AZURE_FOUNDRY_ENDPOINT:
-                errors.append("AZURE_FOUNDRY_ENDPOINT is required when LLM validation is enabled")
-            if not cls.AZURE_FOUNDRY_API_KEY:
-                errors.append("AZURE_FOUNDRY_API_KEY is required when LLM validation is enabled")
+            if not cls.AZURE_OPENAI_ENDPOINT:
+                errors.append("AZURE_OPENAI_ENDPOINT is required when LLM validation is enabled")
+            if not cls.AZURE_OPENAI_API_KEY:
+                errors.append("AZURE_OPENAI_API_KEY is required when LLM validation is enabled")
+            if not cls.AZURE_OPENAI_DEPLOYMENT_NAME:
+                errors.append("AZURE_OPENAI_DEPLOYMENT_NAME is required when LLM validation is enabled")
         
         # Validate thresholds
         if not (0 <= cls.HIGH_CONFIDENCE_OVERLAP_THRESHOLD <= 1):
@@ -198,10 +193,10 @@ THRESHOLDS:
   PK Uniqueness: {cls.UNIQUE_THRESHOLD_FOR_PK:.0%}
   FK Uniqueness: {cls.UNIQUE_THRESHOLD_FOR_FK:.0%}
 
-LLM (Azure AI Foundry):
+LLM (Azure OpenAI):
   Enabled: {cls.ENABLE_LLM_VALIDATION}
-  Model: {cls.LLM_MODEL}
-  Endpoint: {cls.AZURE_FOUNDRY_ENDPOINT or 'Not Set'}
+  Deployment: {cls.AZURE_OPENAI_DEPLOYMENT_NAME}
+  Endpoint: {cls.AZURE_OPENAI_ENDPOINT or 'Not Set'}
 
 PERFORMANCE:
   Max Files: {cls.MAX_FILES_LIMIT}

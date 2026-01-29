@@ -130,12 +130,18 @@ class BusinessContextValidator:
     def _ask_llm_business_questions(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Ask LLM to validate business completeness."""
         
+        if not self.llm.llm:
+            return self._get_fallback_insights()
+        
         prompt = self._build_business_validation_prompt(context)
         
         try:
-            response = self.llm._call_azure_foundry(prompt)
+            # Use LangChain LLM from llm_reasoner
+            response = self.llm.llm.invoke(prompt)
+            
+            # Parse JSON response
             import json
-            insights = json.loads(response)
+            insights = json.loads(response.content)
             
             logger.success("✓ Business context validated")
             return insights

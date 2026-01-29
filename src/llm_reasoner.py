@@ -1,13 +1,12 @@
 """
-LLM Semantic Reasoning Layer.
-Uses Llama-3.3B in Azure AI Foundry for semantic validation.
+LLM Semantic Reasoning Layer - LangChain Implementation.
+Uses Azure OpenAI via LangChain for semantic validation.
 """
 
 import os
 import json
 from typing import Dict, Any, Optional
 from loguru import logger
-import requests
 
 from src.config import Config
 
@@ -15,13 +14,14 @@ from src.config import Config
 class LLMReasoner:
     """
     LLM-based semantic reasoning for relationship validation.
-    Uses Llama-3.3B deployed in Azure AI Foundry.
+    Uses LangChain with Azure OpenAI for robust, standardized LLM calls.
     """
     
     def __init__(self):
-        self.endpoint = Config.AZURE_FOUNDRY_ENDPOINT
-        self.api_key = Config.AZURE_FOUNDRY_API_KEY
-        self.model = Config.LLM_MODEL
+        self.api_key = Config.AZURE_OPENAI_API_KEY
+        self.endpoint = Config.AZURE_OPENAI_ENDPOINT
+        self.deployment = Config.AZURE_OPENAI_DEPLOYMENT_NAME
+        self.llm = None
         
         if not Config.ENABLE_LLM_VALIDATION:
             logger.warning("LLM validation is disabled in configuration")
@@ -29,9 +29,29 @@ class LLMReasoner:
         
         if not self.endpoint or not self.api_key:
             logger.warning(
-                "Azure AI Foundry credentials not configured. "
+                "Azure OpenAI credentials not configured. "
                 "LLM validation will be skipped."
             )
+            return
+        
+        # Initialize LangChain LLM
+        try:
+            from langchain_openai import ChatOpenAI
+            
+            self.llm = ChatOpenAI(
+                model=self.deployment,
+                api_key=self.api_key,
+                base_url=self.endpoint,
+                temperature=Config.LLM_TEMPERATURE,
+                max_tokens=Config.LLM_MAX_TOKENS
+            )
+            
+            logger.debug(f"LLM initialized: {self.deployment}")
+            
+        except ImportError:
+            logger.error("langchain-openai not installed. Run: pip install langchain-openai")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM: {e}")
     
     def validate_relationship(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -43,26 +63,26 @@ class LLMReasoner:
         Returns:
             Dictionary with validation result
         """
-        if not Config.ENABLE_LLM_VALIDATION:
-            return self._get_fallback_result("LLM validation disabled")
-        
-        if not self.endpoint or not self.api_key:
-            return self._get_fallback_result("LLM credentials not configured")
+        if not Config.ENABLE_LLM_VALIDATION or not self.llm:
+            return self._get_fallback_result("LLM not available")
         
         try:
             # Build prompt
             prompt = self._build_validation_prompt(candidate)
             
-            # Call Azure AI Foundry
-            response = self._call_azure_foundry(prompt)
+            # Call LLM via LangChain
+            response = self.llm.invoke(prompt)
             
-            # Parse response
-            result = json.loads(response)
+            # Parse JSON response
+            result = json.loads(response.content)
             
             logger.debug(f"LLM validated: {candidate['source']['column']} <-> {candidate['target']['column']}")
             
             return result
             
+        except json.JSONDecodeError as e:
+            logger.error(f"LLM returned invalid JSON: {e}")
+            return self._get_fallback_result(f"Invalid JSON response")
         except Exception as e:
             logger.error(f"LLM validation failed: {e}")
             return self._get_fallback_result(f"Error: {str(e)}")
@@ -116,57 +136,6 @@ Respond ONLY with valid JSON in this EXACT format (no markdown, no code blocks):
         
         return prompt
     
-    def _call_azure_foundry(self, prompt: str) -> str:
-        """
-        Call Azure AI Foundry API.
-        
-        Args:
-            prompt: User prompt
-            
-        Returns:
-            Response text
-        """
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a data analyst expert. Analyze column relationships "
-                        "and provide structured JSON responses ONLY. No explanations, "
-                        "no markdown formatting, just pure JSON."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "temperature": Config.LLM_TEMPERATURE,
-            "max_tokens": Config.LLM_MAX_TOKENS,
-            "response_format": {"type": "json_object"}
-        }
-        
-        try:
-            response = requests.post(
-                f"{self.endpoint}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-            
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Azure AI Foundry API call failed: {e}")
-    
     def _get_fallback_result(self, reason: str) -> Dict[str, Any]:
         """Return conservative fallback when LLM is unavailable."""
         return {
@@ -181,49 +150,28 @@ Respond ONLY with valid JSON in this EXACT format (no markdown, no code blocks):
     
     def test_connection(self) -> bool:
         """
-        Test connection to Azure AI Foundry.
+        Test connection to Azure OpenAI.
         
         Returns:
             bool: True if connection successful
         """
-        if not self.endpoint or not self.api_key:
-            logger.error("Azure AI Foundry credentials not configured")
+        if not self.llm:
+            logger.error("LLM not initialized - check configuration")
             return False
         
         try:
-            test_candidate = {
-                "source": {
-                    "file": "test.xlsx",
-                    "column": "id",
-                    "data_type": "int",
-                    "sample_values": [1, 2, 3],
-                    "uniqueness": 1.0,
-                    "null_percent": 0.0
-                },
-                "target": {
-                    "file": "test2.xlsx",
-                    "column": "test_id",
-                    "data_type": "int",
-                    "sample_values": [1, 2, 3],
-                    "uniqueness": 0.5,
-                    "null_percent": 0.0
-                },
-                "statistics": {
-                    "value_overlap_percent": 100.0,
-                    "orphans_in_source": 0,
-                    "orphans_in_target": 0
-                }
-            }
+            # Simple test query
+            response = self.llm.invoke("Respond with just the word 'OK' if you can read this.")
             
-            result = self.validate_relationship(test_candidate)
-            
-            if result.get("is_related") is not None:
-                logger.success("✓ Azure AI Foundry connection successful")
+            if response and response.content:
+                logger.success("✓ Azure OpenAI connection successful")
+                logger.info(f"  Model: {self.deployment}")
+                logger.info(f"  Response: {response.content[:50]}")
                 return True
             else:
-                logger.error("✗ Azure AI Foundry returned invalid response")
+                logger.error("✗ Azure OpenAI returned empty response")
                 return False
                 
         except Exception as e:
-            logger.error(f"✗ Azure AI Foundry connection failed: {e}")
+            logger.error(f"✗ Azure OpenAI connection failed: {e}")
             return False
