@@ -1,0 +1,276 @@
+"""
+Main  orchestrator for the Excel Relationship Discovery System.
+Ties all components together.
+"""
+
+import pandas as pd
+from pathlib import Path
+from typing import List, Dict, Any
+from loguru import logger
+from datetime import datetime
+import sys
+
+from src.config import Config
+from src.excel_loader import ExcelLoader
+from src.profiling_engine import ProfilingEngine
+from src.relationship_detector import RelationshipDetector
+from src.llm_reasoner import LLMReasoner
+
+
+class RelationshipDiscovery:
+    """
+    Main orchestrator for discovering relationships between Excel files.
+    """
+    
+    def __init__(self):
+        self.loader = ExcelLoader()
+        self.profiler = ProfilingEngine()
+        self.llm_reasoner = LLMReasoner()
+        
+        # Configure logging
+        logger.remove()
+        logger.add(
+            sys.stderr,
+            level=Config.LOG_LEVEL,
+            format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
+        )
+    
+    def discover_relationships(
+        self,
+        file_paths: List[str],
+        output_file: str = None
+    ) -> Dict[str, Any]:
+        """
+        Main entry point for relationship discovery.
+        
+        Args:
+            file_paths: List of paths to Excel files
+            output_file: Optional path for JSON report output
+            
+        Returns:
+            Dictionary containing the complete relationship report
+        """
+        logger.info("="* 60)
+        logger.info("Excel Relationship Discovery System")
+        logger.info("="* 60)
+        
+        # Display configuration
+        if Config.LOG_LEVEL == "DEBUG":
+            print(Config.summary())
+        
+        start_time = datetime.now()
+        
+        try:
+            # Step 1: Load and validate files
+            logger.info("\n[Step 1/6] Loading Excel files...")
+            dataframes = self.loader.load_files(file_paths)
+            
+            # Step 2: Profile all columns
+            logger.info("\n[Step 2/6] Profiling data...")
+            profiles = self.profiler.profile_all_files(dataframes)
+            
+            # Step 3: Generate relationship cadidates
+            logger.info("\n[Step 3/6] Detecting relationships...")
+            detector = RelationshipDetector(profiles, dataframes)
+            candidates = detector.generate_candidates()
+            
+            # Step 4: LLM semantic validation (for medium/low confidence only)
+            logger.info("\n[Step 4/6] LLM semantic validation...")
+            validated_candidates = self._llm_validation_phase(candidates, profiles)
+            
+            # Step 5: Validate relationships
+            logger.info("\n[Step 5/6] Validating relationships...")
+            validated_relationships = self._validation_phase(validated_candidates, dataframes)
+            
+            # Step 6: Generate JSON report
+            logger.info("\n[Step 6/6] Generating JSON report...")
+            report = self._generate_report(
+                profiles,
+                validated_relationships,
+                start_time
+            )
+            
+            # Save report
+            if output_file:
+                self._save_report(report, output_file)
+            else:
+                # Auto-generate filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                default_output = f"output/relationship_report_{timestamp}.json"
+                self._save_report(report, default_output)
+            
+            # Summary
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            
+            logger.info("\n" + "="* 60)
+            logger.success(f"✓ Discovery complete in {duration:.1f}s")
+            logger.info(f"  Files analyzed: {len(dataframes)}")
+            logger.info(f"  Relationships found: {len(validated_relationships)}")
+            logger.info(f"  High confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'HIGH')}")
+            logger.info(f"  Medium confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'MEDIUM')}")
+            logger.info(f"  Low confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'LOW')}")
+            logger.info("="* 60)
+            
+            return report
+            
+        except Exception as e:
+            logger.error(f"\n✗ Discovery failed: {e}")
+            raise
+    
+    def _llm_validation_phase(self, candidates, profiles):
+        """Apply LLM validation to candidates that require it."""
+        validated = []
+        
+        for candidate in candidates:
+            if candidate.requires_llm_validation and Config.ENABLE_LLM_VALIDATION:
+                # Prepare candidate data for LLM
+                llm_input = {
+                    "source": {
+                        "file": candidate.source_file,
+                        "column": candidate.source_column,
+                        **self._get_column_data(profiles, candidate.source_file, candidate.source_column)
+                    },
+                    "target": {
+                        "file": candidate.target_file,
+                        "column": candidate.target_column,
+                        **self._get_column_data(profiles, candidate.target_file, candidate.target_column)
+                    },
+                    "statistics": candidate.statistics
+                }
+                
+                # Validate with LLM
+                llm_result = self.llm_reasoner.validate_relationship(llm_input)
+                
+                # Update candidate with LLM result
+                if llm_result.get("is_related"):
+                    candidate.confidence_score = llm_result.get("confidence_score", candidate.confidence_score)
+                    candidate.relationship_type = llm_result.get("relationship_type", candidate.relationship_type)
+                    if llm_result.get("warnings"):
+                        candidate.warnings.extend(llm_result["warnings"])
+                    validated.append(candidate)
+            else:
+                validated.append(candidate)
+        
+        return validated
+    
+    def _get_column_data(self, profiles, file_path, column_name):
+        """Get column profile data."""
+        col_profile = profiles.get(file_path, {}).get("columns", {}).get(column_name, {})
+        return {
+            "data_type": col_profile.get("data_type"),
+            "sample_values": col_profile.get("sample_values", []),
+            "uniqueness": col_profile.get("unique_percent", 0) /100,
+            "null_percent": col_profile.get("null_percent", 0)
+        }
+    
+    def _validation_phase(self, candidates, dataframes):
+        """Validate all relationships."""
+        # For now, just return candidates
+        # In full implementation, would do referential integrity checks, etc.
+        return candidates
+    
+    def _generate_report(self, profiles, relationships, start_time):
+        """Generate final JSON report."""
+        from pathlib import Path
+        
+        end_time = datetime.now()
+        
+        report = {
+            "report_metadata": {
+                "generated_at": end_time.isoformat(),
+                "file_count": len(profiles),
+                "total_relationships_found": len(relationships),
+                "high_confidence": sum(1 for r in relationships if r.confidence_level == "HIGH"),
+                "medium_confidence": sum(1 for r in relationships if r.confidence_level == "MEDIUM"),
+                "low_confidence": sum(1 for r in relationships if r.confidence_level == "LOW"),
+                "processing_time_seconds": (end_time - start_time).total_seconds()
+            },
+            "files": [],
+            "relationships": [],
+            "recommendations": []
+        }
+        
+        # Add file profiles
+        for file_path, file_profile in profiles.items():
+            report["files"].append({
+                "file_name": Path(file_path).name,
+                "file_path": file_path,
+                "row_count": file_profile["row_count"],
+                "column_count": file_profile["column_count"],
+                "columns": [
+                    {
+                        **col_data,
+                        "name": col_name
+                    }
+                    for col_name, col_data in file_profile["columns"].items()
+                ]
+            })
+        
+        # Add relationships
+        for rel in relationships:
+            report["relationships"].append(rel.to_dict())
+        
+        # Add recommendations
+        for rel in relationships:
+            if rel.warnings:
+                for warning in rel.warnings:
+                    report["recommendations"].append({
+                        "type": "DATA_QUALITY",
+                        "severity": "MEDIUM",
+                        "message": f"{rel.source_column} <-> {rel.target_column}: {warning}"
+                    })
+        
+        return report
+    
+    def _save_report(self, report, output_file):
+        """Save report to JSON file."""
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        import json
+        with open(output_path, 'w', encoding='utf-8') as f:
+            if Config.PRETTY_PRINT_JSON:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+            else:
+                json.dump(report, f, ensure_ascii=False)
+        
+        logger.success(f"✓ Report saved to: {output_path}")
+
+
+def main():
+    """Command-line entry point."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Discover relationships between Excel files"
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        help="Excel files to analyze"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        help="Output JSON file path",
+        default=None
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Disable LLM validation"
+    )
+    
+    args = parser.parse_args()
+    
+    # Override config if needed
+    if args.no_llm:
+        Config.ENABLE_LLM_VALIDATION = False
+    
+    # Run discovery
+    discovery = RelationshipDiscovery()
+    discovery.discover_relationships(args.files, args.output)
+
+
+if __name__ == "__main__":
+    main()

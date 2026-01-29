@@ -1,0 +1,22 @@
+# Core Data Processing
+pandas>=2.0.0                # Use latest with pre-built wheels
+numpy>=1.24.0                # Use latest compatible version
+openpyxl>=3.0.0              # Excel .xlsx reading
+xlrd>=2.0.0                  # Legacy .xls support
+
+# Statistical Analysis
+scikit-learn>=1.3.0          # Embedding similarity
+
+# String Matching
+rapidfuzz>=3.0.0             # Fuzzy string matching
+
+# LLM Integration - Azure AI Foundry
+requests>=2.31.0             # HTTP client for Azure endpoints
+
+# Data Validation
+pydantic>=2.0.0              # Schema validation
+
+# Utilities
+python-dotenv>=1.0.0         # Environment variables
+loguru>=0.7.0                # Logging
+tqdm>=4.66.0                 # Progress bars
