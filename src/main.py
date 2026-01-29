@@ -15,6 +15,7 @@ from src.excel_loader import ExcelLoader
 from src.profiling_engine import ProfilingEngine
 from src.relationship_detector import RelationshipDetector
 from src.llm_reasoner import LLMReasoner
+from src.business_validator import BusinessContextValidator
 
 
 class RelationshipDiscovery:
@@ -26,6 +27,7 @@ class RelationshipDiscovery:
         self.loader = ExcelLoader()
         self.profiler = ProfilingEngine()
         self.llm_reasoner = LLMReasoner()
+        self.business_validator = BusinessContextValidator()
         
         # Configure logging
         logger.remove()
@@ -82,6 +84,12 @@ class RelationshipDiscovery:
             logger.info("\n[Step 5/6] Validating relationships...")
             validated_relationships = self._validation_phase(validated_candidates, dataframes)
             
+            # Step 5.5: BUSINESS CONTEXT VALIDATION (Standout Feature!)
+            logger.info("\n[Step 5.5/6] 🌟 Validating business context...")
+            business_insights = self.business_validator.validate_business_context(
+                profiles, validated_relationships
+            )
+            
             # Step 6: Generate JSON report
             logger.info("\n[Step 6/6] Generating JSON report...")
             report = self._generate_report(
@@ -110,6 +118,12 @@ class RelationshipDiscovery:
             logger.info(f"  High confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'HIGH')}")
             logger.info(f"  Medium confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'MEDIUM')}")
             logger.info(f"  Low confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'LOW')}")
+            
+            # Business insights summary
+            if business_insights and business_insights.get("tells_complete_story"):
+                logger.success(f"  🌟 Business Context: {business_insights.get('business_value_assessment', 'N/A')} value")
+                logger.info(f"     \"{business_insights.get('executive_summary', 'N/A')}\"")
+            
             logger.info("="* 60)
             
             return report
@@ -170,7 +184,7 @@ class RelationshipDiscovery:
         # In full implementation, would do referential integrity checks, etc.
         return candidates
     
-    def _generate_report(self, profiles, relationships, start_time):
+    def _generate_report(self, profiles, relationships, start_time, business_insights=None):
         """Generate final JSON report."""
         from pathlib import Path
         
@@ -186,6 +200,7 @@ class RelationshipDiscovery:
                 "low_confidence": sum(1 for r in relationships if r.confidence_level == "LOW"),
                 "processing_time_seconds": (end_time - start_time).total_seconds()
             },
+            "business_insights": business_insights or {},
             "files": [],
             "relationships": [],
             "recommendations": []
