@@ -53,6 +53,27 @@ class ProfilingEngine:
         logger.success(f"Profiled {len(self.profiles)} files")
         return self.profiles
     
+    def _sanitize_for_json(self, obj):
+        """Convert numpy/pandas types to native Python types for JSON serialization."""
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {key: self._sanitize_for_json(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._sanitize_for_json(item) for item in obj]
+        elif pd.isna(obj):
+            return None
+        else:
+            return obj
+    
     def profile_dataframe(
         self,
         df: pd.DataFrame,
@@ -182,8 +203,8 @@ class ProfilingEngine:
             profile["median"] = float(non_null.median()) if len(non_null) > 0 else None
             profile["std"] = float(non_null.std()) if len(non_null) > 1 else None
             
-            # Check if sequential
-            profile["is_sequential"] = self.type_inferrer.is_sequential(series)
+            # Check if sequential (convert to native Python bool)
+            profile["is_sequential"] = bool(self.type_inferrer.is_sequential(series))
             
         elif profile["data_type"] == "string":
             # String statistics
@@ -317,7 +338,8 @@ class ProfilingEngine:
         
         profile["semantic_hints"] = semantic_hints
         
-        return profile
+        # Sanitize all values for JSON serialization
+        return self._sanitize_for_json(profile)
     
     def _detect_composite_keys(self, df: pd.DataFrame) -> List[List[str]]:
         """
