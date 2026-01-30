@@ -84,19 +84,22 @@ class RelationshipDiscovery:
             logger.info("\n[Step 5/6] Validating relationships...")
             validated_relationships = self._validation_phase(validated_candidates, dataframes)
             
-            # Step 5.5: BUSINESS CONTEXT VALIDATION (Standout Feature!)
-            logger.info("\n[Step 5.5/6] 🌟 Validating business context...")
-            business_insights = self.business_validator.validate_business_context(
-                profiles, validated_relationships
-            )
+            # Step 5.5: BUSINESS CONTEXT VALIDATION (Per-Relationship Analysis!)
+            # Validate EACH relationship individually to get specific insights
+            logger.info("\n[Step 5.5/6] 🌟 Validating business context for each relationship...")
+            for relationship in validated_relationships:
+                relationship.business_insights = self.business_validator.validate_single_relationship(
+                    relationship,
+                    profiles[relationship.source_file],
+                    profiles[relationship.target_file]
+                )
             
             # Step 6: Generate JSON report
             logger.info("\n[Step 6/6] Generating JSON report...")
             report = self._generate_report(
                 profiles,
                 validated_relationships,
-                start_time,
-                business_insights  # Pass business insights to report
+                start_time
             )
             
             # Save report
@@ -121,9 +124,18 @@ class RelationshipDiscovery:
             logger.info(f"  Low confidence: {sum(1 for r in validated_relationships if r.confidence_level == 'LOW')}")
             
             # Business insights summary
-            if business_insights and business_insights.get("tells_complete_story"):
-                logger.success(f"  🌟 Business Context: {business_insights.get('business_value_assessment', 'N/A')} value")
-                logger.info(f"     \"{business_insights.get('executive_summary', 'N/A')}\"")
+            relationships_with_insights = sum(
+                1 for r in validated_relationships 
+                if r.business_insights and r.business_insights.get("is_relationship_helpful") in ["ESSENTIAL", "HELPFUL"]
+            )
+            if relationships_with_insights > 0:
+                logger.success(f"  🌟 Business Insights: {relationships_with_insights} relationships analyzed")
+                essential_count = sum(
+                    1 for r in validated_relationships
+                    if r.business_insights and r.business_insights.get("is_relationship_helpful") == "ESSENTIAL"
+                )
+                if essential_count > 0:
+                    logger.info(f"     {essential_count} ESSENTIAL relationships identified")
             
             logger.info("="* 60)
             
@@ -185,7 +197,7 @@ class RelationshipDiscovery:
         # In full implementation, would do referential integrity checks, etc.
         return candidates
     
-    def _generate_report(self, profiles, relationships, start_time, business_insights=None):
+    def _generate_report(self, profiles, relationships, start_time):
         """Generate final JSON report."""
         from pathlib import Path
         
@@ -201,9 +213,8 @@ class RelationshipDiscovery:
                 "low_confidence": sum(1 for r in relationships if r.confidence_level == "LOW"),
                 "processing_time_seconds": (end_time - start_time).total_seconds()
             },
-            "business_insights": business_insights or {},
             "files": [],
-            "relationships": [],
+            "relationships": [],  # Each relationship now includes its own business_insights
             "recommendations": []
         }
         

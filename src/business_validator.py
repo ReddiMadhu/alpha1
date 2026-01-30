@@ -24,6 +24,40 @@ class BusinessContextValidator:
     def __init__(self):
         self.llm = LLMReasoner()
     
+    def validate_single_relationship(
+        self,
+        relationship: Any,
+        source_profile: Dict[str, Any],
+        target_profile: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate a SINGLE relationship and generate business insights specific to it.
+        
+        This method asks: "What does THIS specific relationship reveal?"
+        
+        Args:
+            relationship: Single relationship candidate
+            source_profile: Profile of the source file
+            target_profile: Profile of the target file
+            
+        Returns:
+            Dictionary with business insights for this relationship
+        """
+        if not Config.ENABLE_LLM_VALIDATION:
+            return self._get_fallback_single_relationship_insights()
+       
+        logger.info(f"  Analyzing: {relationship.source_column} → {relationship.target_column}")
+        
+        # Build context for this specific relationship
+        context = self._build_single_relationship_context(
+            relationship, source_profile, target_profile
+        )
+        
+        # Ask LLM about this specific relationship
+        insights = self._ask_llm_single_relationship(context)
+        
+        return insights
+    
     def validate_business_context(
         self,
         profiles: Dict[str, Dict[str, Any]],
@@ -295,6 +329,172 @@ Respond ONLY with valid JSON (no markdown, no code blocks):
 }}"""
         
         return prompt
+    
+    def _build_single_relationship_context(
+        self,
+        relationship: Any,
+        source_profile: Dict[str, Any],
+        target_profile: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build context for a single relationship analysis."""
+        from pathlib import Path
+        
+        # Get source column profile
+        source_col_profile = source_profile["columns"].get(relationship.source_column, {})
+        target_col_profile = target_profile["columns"].get(relationship.target_column, {})
+        
+        # Infer entity types
+        source_entity = self._infer_business_entity(
+            Path(relationship.source_file).stem, 
+            source_profile
+        )
+        target_entity = self._infer_business_entity(
+            Path(relationship.target_file).stem,
+            target_profile
+        )
+        
+        return {
+            "relationship_id": relationship.relationship_id,
+            "source": {
+                "file": Path(relationship.source_file).stem,
+                "column": relationship.source_column,
+                "entity_type": source_entity,
+                "data_type": source_col_profile.get("data_type"),
+                "sample_values": source_col_profile.get("sample_values", []),
+                "uniqueness": source_col_profile.get("unique_percent", 0),
+                "is_primary_key": source_col_profile.get("key_features", {}).get("primary_key_candidate", False),
+                "row_count": source_profile["row_count"]
+            },
+            "target": {
+                "file": Path(relationship.target_file).stem,
+                "column": relationship.target_column,
+                "entity_type": target_entity,
+                "data_type": target_col_profile.get("data_type"),
+                "sample_values": target_col_profile.get("sample_values", []),
+                "uniqueness": target_col_profile.get("unique_percent", 0),
+                "is_primary_key": target_col_profile.get("key_features", {}).get("primary_key_candidate", False),
+                "row_count": target_profile["row_count"]
+            },
+            "relationship_type": relationship.relationship_type,
+            "statistics": relationship.statistics,
+            "confidence": relationship.confidence_level
+        }
+    
+    def _ask_llm_single_relationship(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Ask LLM to analyze a single relationship."""
+        
+        if not self.llm.llm:
+            return self._get_fallback_single_relationship_insights()
+        
+        prompt = self._build_single_relationship_prompt(context)
+        
+        try:
+            response = self.llm.llm.invoke(prompt)
+            
+            # Parse JSON response
+            import json
+            insights = json.loads(response.content)
+            
+            return insights
+            
+        except Exception as e:
+            logger.warning(f"Single relationship validation failed: {e}")
+            return self._get_fallback_single_relationship_insights()
+    
+    def _build_single_relationship_prompt(self, context: Dict[str, Any]) -> str:
+        """Build LLM prompt for single relationship analysis."""
+        
+        source = context["source"]
+        target = context["target"]
+        stats = context["statistics"]
+        
+        prompt = f"""You are an expert business intelligence analyst evaluating a specific data relationship.
+
+RELATIONSHIP TO ANALYZE:
+
+**Source Table:**
+- File: {source['file']} ({source['entity_type']})
+- Column: {source['column']}
+- Data Type: {source['data_type']}
+- Sample Values: {', '.join(map(str, source['sample_values'][:5]))}
+- Uniqueness: {source['uniqueness']:.1f}%
+- {'✓ Primary Key Candidate' if source['is_primary_key'] else ''}
+- Row Count: {source['row_count']:,}
+
+**Target Table:**
+- File: {target['file']} ({target['entity_type']})
+- Column: {target['column']}
+- Data Type: {target['data_type']}
+- Sample Values: {', '.join(map(str, target['sample_values'][:5]))}
+- Uniqueness: {target['uniqueness']:.1f}%
+- {'✓ Primary Key Candidate' if target['is_primary_key'] else ''}
+- Row Count: {target['row_count']:,}
+
+**Relationship Details:**
+- Type: {context['relationship_type']}
+- Confidence: {context['confidence']}
+- Value Overlap: {stats.get('value_overlap_percent', 0):.1f}%
+- Orphan Records (Source): {stats.get('orphans_in_source', 0)}
+- Orphan Records (Target): {stats.get('orphans_in_target', 0)}
+
+ANALYZE THIS SPECIFIC RELATIONSHIP ONLY:
+
+1. **VALIDITY**: Is this join logically valid and meaningful for business analysis?
+2. **STORY**: What specific story does connecting THESE TWO tables tell?
+3. **DECISION VALUE**: What specific decisions can be made with THIS connection?
+4. **INSIGHTS**: What insights are revealed by joining these specific tables?
+5. **HELPFULNESS**: Is this relationship ESSENTIAL, HELPFUL, MARGINAL, or QUESTIONABLE?
+6. **ANSWERABLE QUESTIONS**: What specific questions become answerable with THIS join?
+7. **DATA QUALITY**: Any concerns about this specific connection?
+
+Respond ONLY with valid JSON (no markdown, no code blocks):
+
+{{
+  "relationship_validity": {{
+    "is_valid": true,
+    "explanation": "Brief explanation of why this join makes business sense"
+  }},
+  "what_story_it_tells": "One sentence describing what connecting these tables reveals",
+  "decision_making_value": {{
+    "can_decision_makers_act": true,
+    "specific_actions_enabled": [
+      "Specific action 1",
+      "Specific action 2"
+    ]
+  }},
+  "critical_insights_revealed": [
+    "Insight 1 from this join",
+    "Insight 2 from this join"
+  ],
+  "answerable_questions": [
+    "Question 1 answerable with this join",
+    "Question 2 answerable with this join"
+  ],
+  "is_relationship_helpful": "ESSENTIAL",
+  "helpfulness_reason": "Why this specific relationship is valuable",
+  "data_quality_concerns": []
+}}"""
+        
+        return prompt
+    
+    def _get_fallback_single_relationship_insights(self) -> Dict[str, Any]:
+        """Return fallback insights for a single relationship when LLM is unavailable."""
+        return {
+            "relationship_validity": {
+                "is_valid": None,
+                "explanation": "LLM validation required"
+            },
+            "what_story_it_tells": "LLM validation unavailable",
+            "decision_making_value": {
+                "can_decision_makers_act": None,
+                "specific_actions_enabled": []
+            },
+            "critical_insights_revealed": [],
+            "answerable_questions": [],
+            "is_relationship_helpful": "UNKNOWN",
+            "helpfulness_reason": "LLM validation required",
+            "data_quality_concerns": ["LLM validation unavailable"]
+        }
     
     def _get_fallback_insights(self) -> Dict[str, Any]:
         """Return basic insights when LLM is unavailable."""

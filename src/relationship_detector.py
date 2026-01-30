@@ -37,6 +37,7 @@ class RelationshipCandidate:
     requires_llm_validation: bool = False
     transformation_needed: Optional[str] = None
     warnings: List[str] = None
+    business_insights: Optional[Dict[str, Any]] = None  # Per-relationship business analysis
     
     def __post_init__(self):
         if self.warnings is None:
@@ -61,7 +62,8 @@ class RelationshipCandidate:
             "statistics": self.statistics,
             "transformation_needed": self.transformation_needed,
             "warnings": self.warnings,
-            "requires_llm_validation": self.requires_llm_validation
+            "requires_llm_validation": self.requires_llm_validation,
+            "business_insights": self.business_insights or {}  # Include per-relationship insights
         }
 
 
