@@ -1,6 +1,7 @@
 """
-Business Context Validator - The Standout Feature
-Validates if discovered relationships tell a complete business story.
+Business Context Validator - Domain-Agnostic Analysis
+Validates if discovered relationships tell a complete business story across ANY data domain.
+Asks critical questions about relationship validity, data coherence, and actionable insights.
 """
 
 from typing import Dict, List, Any, Optional
@@ -98,34 +99,53 @@ class BusinessContextValidator:
         }
     
     def _infer_business_entity(self, file_name: str, profile: Dict) -> str:
-        """Infer business entity type from file name and columns."""
+        """Infer generic business entity type from file name and column patterns."""
         name_lower = file_name.lower()
+        columns_lower = [col.lower() for col in profile.get("columns", {}).keys()]
         
-        # Common insurance entities
-        if any(kw in name_lower for kw in ['policy', 'policies']):
-            return "Policy"
-        elif any(kw in name_lower for kw in ['claim', 'claims']):
-            return "Claim"
-        elif any(kw in name_lower for kw in ['customer', 'client', 'insured']):
-            return "Customer"
-        elif any(kw in name_lower for kw in ['agent', 'broker']):
-            return "Agent"
-        elif any(kw in name_lower for kw in ['premium', 'payment']):
-            return "Premium"
-        elif any(kw in name_lower for kw in ['coverage', 'benefit']):
-            return "Coverage"
-        elif any(kw in name_lower for kw in ['property', 'asset']):
-            return "Property"
+        # Master Data Entities (relatively stable, reference data)
+        if any(kw in name_lower for kw in ['customer', 'client', 'user', 'member', 'patient', 'employee', 'contact']):
+            return "Master Data - People/Entities"
+        elif any(kw in name_lower for kw in ['product', 'item', 'sku', 'inventory', 'catalog', 'part']):
+            return "Master Data - Products/Items"
+        elif any(kw in name_lower for kw in ['location', 'store', 'warehouse', 'facility', 'branch']):
+            return "Master Data - Locations"
+        elif any(kw in name_lower for kw in ['supplier', 'vendor', 'partner', 'agent', 'broker']):
+            return "Master Data - Partners"
         
-        # General business entities
-        elif any(kw in name_lower for kw in ['order', 'transaction']):
-            return "Transaction"
-        elif any(kw in name_lower for kw in ['product', 'item']):
-            return "Product"
-        elif any(kw in name_lower for kw in ['invoice', 'billing']):
-            return "Billing"
-        else:
-            return "Unknown"
+        # Transactional Entities (events, changes over time)
+        elif any(kw in name_lower for kw in ['order', 'sale', 'purchase', 'transaction', 'booking']):
+            return "Transaction - Sales/Orders"
+        elif any(kw in name_lower for kw in ['payment', 'invoice', 'billing', 'revenue', 'premium']):
+            return "Transaction - Financial"
+        elif any(kw in name_lower for kw in ['claim', 'incident', 'case', 'ticket', 'issue']):
+            return "Transaction - Service/Claims"
+        elif any(kw in name_lower for kw in ['shipment', 'delivery', 'fulfillment', 'logistics']):
+            return "Transaction - Operations"
+        
+        # Event/Activity Entities
+        elif any(kw in name_lower for kw in ['visit', 'session', 'activity', 'interaction', 'event', 'log']):
+            return "Event - Activity/Engagement"
+        
+        # Relationship/Junction Entities
+        elif any(kw in name_lower for kw in ['assignment', 'mapping', 'link', 'association']):
+            return "Relationship - Junction Table"
+        
+        # Reference/Lookup Entities
+        elif any(kw in name_lower for kw in ['status', 'type', 'category', 'code', 'lookup', 'reference']):
+            return "Reference - Lookup/Codes"
+        
+        # Analyze column patterns if name doesn't match
+        has_id_pattern = any('_id' in col or col.endswith('id') for col in columns_lower)
+        has_date_pattern = any('date' in col or 'time' in col for col in columns_lower)
+        has_amount_pattern = any('amount' in col or 'price' in col or 'value' in col for col in columns_lower)
+        
+        if has_id_pattern and has_date_pattern and has_amount_pattern:
+            return "Transaction - Unknown Type"
+        elif has_id_pattern and not has_date_pattern:
+            return "Master Data - Unknown Type"
+        
+        return "Unknown Entity Type"
     
     def _ask_llm_business_questions(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Ask LLM to validate business completeness."""
@@ -151,20 +171,21 @@ class BusinessContextValidator:
             return self._get_fallback_insights()
     
     def _build_business_validation_prompt(self, context: Dict[str, Any]) -> str:
-        """Build prompt for business context validation."""
+        """Build prompt for comprehensive business context validation."""
         
         files_desc = "\n".join([
             f"- **{name}** ({data['entity_type']}): {data['row_count']} rows, "
-            f"Keys: {', '.join(data['key_columns']) if data['key_columns'] else 'None'}"
+            f"Keys: {', '.join(data['key_columns']) if data['key_columns'] else 'None'}\n"
+            f"  Columns: {', '.join(data['all_columns'][:10])}{'...' if len(data['all_columns']) > 10 else ''}"
             for name, data in context["files"].items()
         ])
         
         relationships_desc = "\n".join([
-            f"- {rel['from']} → {rel['to']} ({rel['confidence']} confidence)"
+            f"- {rel['from']} → {rel['to']} (Type: {rel['type']}, Confidence: {rel['confidence']})"
             for rel in context["relationships"]
         ])
         
-        prompt = f"""You are a business intelligence analyst specializing in insurance data.
+        prompt = f"""You are an expert business intelligence analyst who evaluates data relationships across any business domain.
 
 DISCOVERED DATA FILES:
 {files_desc}
@@ -172,36 +193,105 @@ DISCOVERED DATA FILES:
 DISCOVERED RELATIONSHIPS:
 {relationships_desc}
 
-CRITICAL QUESTIONS:
+YOUR TASK: Analyze these discovered relationships and answer the following CRITICAL QUESTIONS:
 
-1. **Business Completeness**: Do these files and relationships tell a COMPLETE business story, 
-   or are there critical missing pieces? For insurance data, do we have the full customer journey 
-   (policy → premium → claim → payment)?
+1. **RELATIONSHIP VALIDITY**: Are these discovered joins logically valid and meaningful?
+   - Do the relationships make business sense, or are they just technical column matches?
+   - Are there any questionable or unlikely relationships that should be flagged?
 
-2. **Decision-Making Value**: Can a decision-maker understand the FULL PICTURE from joining 
-   these files, or will they still see isolated snapshots?
+2. **BUSINESS STORY**: What type of story does this connected data tell?
+   - Classify the data story (e.g., "Customer Journey", "Supply Chain", "Financial Operations", "Service Lifecycle")
+   - Explain how the pieces fit together into a coherent narrative
 
-3. **Missing Entities**: What critical business entities or relationships are MISSING that 
-   would be needed for complete analysis? (e.g., missing claims data when we have policies?)
+3. **DECISION-MAKING VALUE**: Can decision-makers act on this information?
+   - What specific actions can executives/managers take with this connected data?
+   - Is the data comprehensive enough to support critical business decisions?
+   - What are the data quality concerns that might limit trust?
 
-4. **Business Insights**: What key business questions CAN be answered with these joins? 
-   What questions CANNOT be answered?
+4. **COHERENCE ANALYSIS**: Are we connecting scattered pieces into a coherent business view?
+   - How well do the different data sources integrate?
+   - Rate the coherence: Do the relationships create a unified view or remain fragmented?
+   - What gaps prevent complete coherence?
 
-5. **Data Quality for Decisions**: Are there any data quality issues that would prevent 
-   executives from trusting these joins for critical decisions?
+5. **CRITICAL INSIGHTS**: What critical insights are revealed by these relationships?
+   - What can we now understand that we couldn't from individual files?
+   - What patterns, trends, or anomalies become visible?
 
-Respond ONLY with valid JSON (no markdown):
+6. **RELATIONSHIP HELPFULNESS**: For each relationship, is it genuinely helpful or just technically possible?
+   - Assess each discovered relationship's value (ESSENTIAL, HELPFUL, MARGINAL, QUESTIONABLE)
+   - Explain why each relationship matters (or doesn't)
+
+7. **ANSWERABLE vs UNANSWERABLE**: What questions CAN and CANNOT be answered?
+   - List 5-10 specific business questions that CAN be answered with these joins
+   - List 3-5 important questions that CANNOT be answered (missing data)
+
+8. **COMPLETENESS**: Do we have a complete picture or are critical pieces missing?
+   - Score completeness 0-100
+   - Identify what's missing for a complete business view
+
+Respond ONLY with valid JSON (no markdown, no code blocks):
 
 {{
-  "completeness_score": 0-100,
-  "tells_complete_story": true or false,
-  "complete_story_explanation": "Brief explanation of why/why not",
+  "completeness_score": 85,
+  "coherence_score": 90,
+  "tells_complete_story": true,
+  "data_story_type": "Customer Lifecycle Analysis",
+  "complete_story_explanation": "Brief explanation of the business narrative",
+  
+  "relationship_validity": {{
+    "all_joins_valid": true,
+    "validity_explanation": "Explanation of why joins make business sense",
+    "questionable_relationships": []
+  }},
+  
+  "decision_making_assessment": {{
+    "can_decision_makers_act": true,
+    "specific_actions_enabled": [
+      "Specific action 1",
+      "Specific action 2"
+    ],
+    "data_quality_concerns": []
+  }},
+  
+  "scattered_pieces_analysis": {{
+    "pieces_well_connected": true,
+    "coherence_explanation": "How the data sources integrate",
+    "gaps_in_coherence": []
+  }},
+  
+  "critical_insights_revealed": [
+    "Insight 1",
+    "Insight 2",
+    "Insight 3"
+  ],
+  
+  "relationship_helpfulness": [
+    {{
+      "relationship": "file1.col → file2.col",
+      "helpfulness": "ESSENTIAL",
+      "reason": "Why this relationship is valuable"
+    }}
+  ],
+  
   "missing_critical_pieces": ["entity1", "entity2"],
-  "answerable_questions": ["question1", "question2"],
-  "unanswerable_questions": ["question1", "question2"],
-  "business_value_assessment": "HIGH" or "MEDIUM" or "LOW",
-  "executive_summary": "One-sentence summary of what this data reveals",
-  "recommendations": ["recommendation1", "recommendation2"]
+  
+  "answerable_questions": [
+    "Question 1",
+    "Question 2"
+  ],
+  
+  "unanswerable_questions": [
+    "Question 1",
+    "Question 2"
+  ],
+  
+  "business_value_assessment": "HIGH",
+  "executive_summary": "One-sentence summary of what this connected data enables",
+  
+  "recommendations": [
+    "Recommendation 1",
+    "Recommendation 2"
+  ]
 }}"""
         
         return prompt
@@ -210,12 +300,31 @@ Respond ONLY with valid JSON (no markdown):
         """Return basic insights when LLM is unavailable."""
         return {
             "completeness_score": 0,
+            "coherence_score": 0,
             "tells_complete_story": False,
+            "data_story_type": "UNKNOWN",
             "complete_story_explanation": "LLM validation unavailable - unable to assess business context",
+            "relationship_validity": {
+                "all_joins_valid": None,
+                "validity_explanation": "LLM validation required",
+                "questionable_relationships": []
+            },
+            "decision_making_assessment": {
+                "can_decision_makers_act": None,
+                "specific_actions_enabled": [],
+                "data_quality_concerns": ["LLM validation unavailable"]
+            },
+            "scattered_pieces_analysis": {
+                "pieces_well_connected": None,
+                "coherence_explanation": "LLM validation required",
+                "gaps_in_coherence": []
+            },
+            "critical_insights_revealed": [],
+            "relationship_helpfulness": [],
             "missing_critical_pieces": [],
             "answerable_questions": [],
             "unanswerable_questions": [],
             "business_value_assessment": "UNKNOWN",
             "executive_summary": "Technical relationships detected, but business context not validated",
-            "recommendations": ["Enable LLM validation for business context analysis"]
+            "recommendations": ["Enable LLM validation for comprehensive business context analysis"]
         }

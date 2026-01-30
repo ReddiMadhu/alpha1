@@ -95,7 +95,8 @@ class RelationshipDiscovery:
             report = self._generate_report(
                 profiles,
                 validated_relationships,
-                start_time
+                start_time,
+                business_insights  # Pass business insights to report
             )
             
             # Save report
