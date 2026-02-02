@@ -5,10 +5,11 @@ Ties all components together.
 
 import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 from datetime import datetime
 import sys
+import threading
 
 from src.config import Config
 from src.excel_loader import ExcelLoader
@@ -16,6 +17,7 @@ from src.profiling_engine import ProfilingEngine
 from src.relationship_detector import RelationshipDetector
 from src.llm_reasoner import LLMReasoner
 from src.business_validator import BusinessContextValidator
+from src.progress_callback import ProgressCallback, NoOpProgressCallback, Stage
 
 
 class RelationshipDiscovery:
@@ -40,18 +42,26 @@ class RelationshipDiscovery:
     def discover_relationships(
         self,
         file_paths: List[str],
-        output_file: str = None
+        output_file: str = None,
+        progress_callback: Optional[ProgressCallback] = None,
+        cancel_event: Optional[threading.Event] = None
     ) -> Dict[str, Any]:
         """
         Main entry point for relationship discovery.
-        
+
         Args:
             file_paths: List of paths to Excel files
             output_file: Optional path for JSON report output
-            
+            progress_callback: Optional progress callback for tracking
+            cancel_event: Optional threading event for cancellation
+
         Returns:
             Dictionary containing the complete relationship report
         """
+        # Use no-op callback if none provided (backward compatibility)
+        if progress_callback is None:
+            progress_callback = NoOpProgressCallback()
+
         logger.info("="* 60)
         logger.info("Excel Relationship Discovery System")
         logger.info("="* 60)
@@ -65,42 +75,64 @@ class RelationshipDiscovery:
         try:
             # Step 1: Load and validate files
             logger.info("\n[Step 1/6] Loading Excel files...")
+            progress_callback.set_stage(Stage.LOADING, len(file_paths))
+
             dataframes = self.loader.load_files(file_paths)
-            
+
+            for file_path in file_paths:
+                progress_callback.increment(f"Loaded {Path(file_path).name}")
+
             # Step 2: Profile all columns
             logger.info("\n[Step 2/6] Profiling data...")
+            progress_callback.set_stage(Stage.PROFILING, sum(len(df.columns) for df in dataframes.values()))
+
             profiles = self.profiler.profile_all_files(dataframes)
-            
-            # Step 3: Generate relationship cadidates
+            # Note: profiling_engine will call increment for each column
+
+            # Step 3: Generate relationship candidates
             logger.info("\n[Step 3/6] Detecting relationships...")
+            progress_callback.set_stage(Stage.DETECTING, len(file_paths) * (len(file_paths) - 1))
+
             detector = RelationshipDetector(profiles, dataframes)
             candidates = detector.generate_candidates()
-            
+
+            progress_callback.increment(f"Found {len(candidates)} candidate relationships")
+
             # Step 4: LLM semantic validation (for medium/low confidence only)
             logger.info("\n[Step 4/6] LLM semantic validation...")
-            validated_candidates = self._llm_validation_phase(candidates, profiles)
-            
+            llm_candidates = [c for c in candidates if c.requires_llm_validation]
+            progress_callback.set_stage(Stage.LLM_VALIDATION, len(llm_candidates) if llm_candidates else 1)
+
+            validated_candidates = self._llm_validation_phase(candidates, profiles, progress_callback)
+
             # Step 5: Validate relationships
             logger.info("\n[Step 5/6] Validating relationships...")
             validated_relationships = self._validation_phase(validated_candidates, dataframes)
-            
+
             # Step 5.5: BUSINESS CONTEXT VALIDATION (Per-Relationship Analysis!)
             # Validate EACH relationship individually to get specific insights
             logger.info("\n[Step 5.5/6] 🌟 Validating business context for each relationship...")
-            for relationship in validated_relationships:
+            progress_callback.set_stage(Stage.BUSINESS_VALIDATION, len(validated_relationships) if validated_relationships else 1)
+
+            for i, relationship in enumerate(validated_relationships):
                 relationship.business_insights = self.business_validator.validate_single_relationship(
                     relationship,
                     profiles[relationship.source_file],
                     profiles[relationship.target_file]
                 )
-            
+                progress_callback.increment(f"Validated relationship {i+1}/{len(validated_relationships)}")
+
             # Step 6: Generate JSON report
             logger.info("\n[Step 6/6] Generating JSON report...")
+            progress_callback.set_stage(Stage.REPORTING, 1)
+
             report = self._generate_report(
                 profiles,
                 validated_relationships,
                 start_time
             )
+
+            progress_callback.increment("Report generated")
             
             # Save report
             if output_file:
@@ -145,11 +177,13 @@ class RelationshipDiscovery:
             logger.error(f"\n✗ Discovery failed: {e}")
             raise
     
-    def _llm_validation_phase(self, candidates, profiles):
+    def _llm_validation_phase(self, candidates, profiles, progress_callback: ProgressCallback):
         """Apply LLM validation to candidates that require it."""
         validated = []
-        
-        for candidate in candidates:
+
+        llm_candidates = [c for c in candidates if c.requires_llm_validation and Config.ENABLE_LLM_VALIDATION]
+
+        for i, candidate in enumerate(candidates):
             if candidate.requires_llm_validation and Config.ENABLE_LLM_VALIDATION:
                 # Prepare candidate data for LLM
                 llm_input = {
@@ -165,10 +199,10 @@ class RelationshipDiscovery:
                     },
                     "statistics": candidate.statistics
                 }
-                
+
                 # Validate with LLM
                 llm_result = self.llm_reasoner.validate_relationship(llm_input)
-                
+
                 # Update candidate with LLM result
                 if llm_result.get("is_related"):
                     candidate.confidence_score = llm_result.get("confidence_score", candidate.confidence_score)
@@ -176,9 +210,16 @@ class RelationshipDiscovery:
                     if llm_result.get("warnings"):
                         candidate.warnings.extend(llm_result["warnings"])
                     validated.append(candidate)
+
+                # Report progress
+                progress_callback.increment(f"Validated {candidate.source_column} → {candidate.target_column}")
             else:
                 validated.append(candidate)
-        
+
+        # If no LLM candidates, still report progress
+        if not llm_candidates:
+            progress_callback.increment("No LLM validation required")
+
         return validated
     
     def _get_column_data(self, profiles, file_path, column_name):

@@ -20,3 +20,11 @@ pydantic>=2.0.0              # Schema validation
 python-dotenv>=1.0.0         # Environment variables
 loguru>=0.7.0                # Logging
 tqdm>=4.66.0                 # Progress bars
+
+# FastAPI Web Framework
+fastapi>=0.104.0             # FastAPI framework
+uvicorn[standard]>=0.24.0    # ASGI server
+python-multipart>=0.0.6      # File upload support
+websockets>=12.0             # WebSocket support
+aiofiles>=23.0.0             # Async file operations
+pydantic-settings>=2.0.0     # Settings management
