@@ -73,6 +73,9 @@ async def create_job(
         # Generate job ID
         job_id = generate_job_id()
 
+        # Create job in database FIRST (before saving files due to foreign key constraint)
+        job = job_store.create_job(job_id=job_id, file_count=len(files))
+
         # Validate and save files
         file_paths = []
         for file in files:
@@ -101,9 +104,6 @@ async def create_job(
                 file_content=content
             )
             file_paths.append(uploaded_file.file_path)
-
-        # Create job in database
-        job = job_store.create_job(job_id=job_id, file_count=len(files))
 
         # Schedule background job
         background_tasks.add_task(

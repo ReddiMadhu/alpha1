@@ -47,6 +47,7 @@ class APIConfig(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = True
+        extra = "ignore"  # Ignore extra fields from .env (Azure OpenAI settings are for core engine)
 
     def ensure_directories(self):
         """Ensure all required directories exist"""
