@@ -1,4 +1,4 @@
-"""
+ü"""
 Test script for Excel Relationship Discovery API
 
 This script demonstrates how to:
@@ -225,3 +225,65 @@ if __name__ == "__main__":
         print(f"\n✗ Test failed: {e}")
         import traceback
         traceback.print_exc()
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List
+
+class APIConfig(BaseSettings):
+    """Configuration for FastAPI application"""
+
+    # ---------------- API ----------------
+    API_HOST: str = "0.0.0.0"
+    API_PORT: int = 8000
+    API_PREFIX: str = "/api/v1"
+    API_TITLE: str = "Excel Relationship Discovery API"
+    API_VERSION: str = "1.0.0"
+    API_DESCRIPTION: str = "Discover relationships between Excel files using AI-powered analysis"
+
+    # ---------------- File Upload ----------------
+    MAX_FILE_SIZE_MB: int = 100
+    MAX_FILES_PER_JOB: int = 5
+    ALLOWED_EXTENSIONS: List[str] = ["xlsx", "xls", "xlsm", "csv"]
+    UPLOAD_DIR: str = "data/uploads"
+    RESULT_DIR: str = "data/results"
+
+    # ---------------- Database ----------------
+    DATABASE_PATH: str = "data/jobs.db"
+
+    # ---------------- Jobs ----------------
+    JOB_TIMEOUT_SECONDS: int = 600
+    MAX_CONCURRENT_JOBS: int = 3
+
+    # ---------------- WebSocket ----------------
+    WS_HEARTBEAT_INTERVAL: int = 30
+    WS_PING_TIMEOUT: int = 60
+
+    # ---------------- CORS ----------------
+    CORS_ORIGINS: List[str] = ["*"]
+    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_ALLOW_METHODS: List[str] = ["*"]
+    CORS_ALLOW_HEADERS: List[str] = ["*"]
+
+    # ---------------- Cleanup ----------------
+    DELETE_FILES_ON_JOB_DELETE: bool = True
+    AUTO_CLEANUP_OLD_JOBS_DAYS: int = 7
+
+    # ---------------- Azure / LLM (THIS WAS MISSING) ----------------
+    USE_AZURE_OPENAI: bool = False
+    AZURE_OPENAI_ENDPOINT: str | None = None
+    AZURE_OPENAI_API_KEY: str | None = None
+    AZURE_OPENAI_DEPLOYMENT_NAME: str | None = None
+    AZURE_FOUNDRY_API_VERSION: str | None = None
+
+    LOG_LEVEL: str = "INFO"
+    ENABLE_CACHING: bool = True
+    ENABLE_LLM_VALIDATION: bool = True
+    PARALLEL_PROCESSING: bool = True
+    MAX_FILES_LIMIT: int = 5
+
+    # ✅ Pydantic v2 config
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="allow"  # or "forbid" if you want strict
+    )
