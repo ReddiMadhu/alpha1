@@ -23,3 +23,15 @@ def generate_file_id() -> str:
         Unique file identifier
     """
     return f"file_{uuid.uuid4().hex[:12]}"
+
+
+def generate_preview_id() -> str:
+    """
+    Generate a unique preview ID
+
+    Returns:
+        Unique preview identifier in format: preview_{timestamp}_{uuid}
+    """
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    unique_id = uuid.uuid4().hex[:8]
+    return f"preview_{timestamp}_{unique_id}"

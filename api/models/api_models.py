@@ -14,6 +14,78 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+# ==================== Preview Models ====================
+
+class ColumnPreview(BaseModel):
+    """Preview metadata for a single column"""
+    name: str = Field(..., description="Column name")
+    data_type: str = Field(..., description="Inferred data type")
+    null_count: int = Field(..., description="Number of null values")
+    unique_count: int = Field(..., description="Number of unique values")
+    sample_values: List[Any] = Field(..., description="Sample values (first 5)")
+
+
+class DuplicateGroupInfo(BaseModel):
+    """Information about a duplicate column group"""
+    group_id: str = Field(..., description="Unique group identifier")
+    detection_type: str = Field(..., description="Detection algorithm used")
+    similarity_score: float = Field(..., description="Similarity score (0-100)")
+    columns: List[str] = Field(..., description="List of duplicate column names")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    recommendation: str = Field(..., description="Recommended action")
+
+
+class FilePreview(BaseModel):
+    """Preview metadata for a single file"""
+    file_id: str = Field(..., description="File identifier")
+    original_filename: str = Field(..., description="Original file name")
+    row_count: int = Field(..., description="Number of rows")
+    column_count: int = Field(..., description="Number of columns")
+    columns: List[ColumnPreview] = Field(..., description="Column previews")
+    duplicate_groups: List[DuplicateGroupInfo] = Field(default_factory=list, description="Detected duplicate groups")
+
+
+class JobPreviewResponse(BaseModel):
+    """Response for preview creation"""
+    preview_id: str = Field(..., description="Unique preview identifier")
+    status: str = Field(..., description="Preview status")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    file_count: int = Field(..., description="Number of files")
+    files: List[FilePreview] = Field(..., description="File previews")
+    total_duplicates_detected: int = Field(..., description="Total duplicate groups across all files")
+    message: str = Field(..., description="Response message")
+
+
+class FileColumnSelection(BaseModel):
+    """User's column selection for a single file"""
+    file_id: str = Field(..., description="File identifier")
+    columns_to_delete: List[str] = Field(default_factory=list, description="Columns to delete")
+
+
+class JobConfirmRequest(BaseModel):
+    """Request to confirm preview and start processing"""
+    file_selections: List[FileColumnSelection] = Field(..., description="Column selections for each file")
+
+
+class JobConfirmResponse(BaseModel):
+    """Response after confirming preview"""
+    job_id: str = Field(..., description="Created job identifier")
+    status: JobStatus = Field(..., description="Job status")
+    created_at: datetime = Field(..., description="Job creation timestamp")
+    file_count: int = Field(..., description="Number of files")
+    columns_removed: int = Field(..., description="Total columns removed")
+    message: str = Field(..., description="Response message")
+
+
+class PreviewDeleteResponse(BaseModel):
+    """Response for preview deletion"""
+    message: str = Field(..., description="Deletion confirmation message")
+    preview_id: str = Field(..., description="Deleted preview identifier")
+    files_deleted: int = Field(default=0, description="Number of files deleted")
+
+
+# ==================== Existing Job Models ====================
+
 class JobCreateOptions(BaseModel):
     """Options for job creation"""
     enable_llm: bool = Field(default=True, description="Enable LLM validation")

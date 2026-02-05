@@ -43,12 +43,35 @@ CREATE TABLE IF NOT EXISTS job_progress (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Preview sessions table
+CREATE TABLE IF NOT EXISTS preview_sessions (
+    preview_id TEXT PRIMARY KEY,
+    status TEXT CHECK(status IN ('preview_ready', 'confirmed', 'cancelled')) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    file_count INTEGER NOT NULL,
+    total_duplicates_detected INTEGER DEFAULT 0
+);
+
+-- Preview files table
+CREATE TABLE IF NOT EXISTS preview_files (
+    file_id TEXT PRIMARY KEY,
+    preview_id TEXT NOT NULL REFERENCES preview_sessions(preview_id) ON DELETE CASCADE,
+    original_filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    dataframe_pickle_path TEXT,
+    row_count INTEGER,
+    column_count INTEGER,
+    metadata_json TEXT
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_uploaded_files_job_id ON uploaded_files(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_progress_job_id ON job_progress(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_progress_timestamp ON job_progress(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_preview_files_preview_id ON preview_files(preview_id);
+CREATE INDEX IF NOT EXISTS idx_preview_sessions_created_at ON preview_sessions(created_at DESC);
 """
 
 
@@ -153,4 +176,20 @@ def cleanup_old_jobs(days: int = 7):
     """
     deleted = execute_update(query, (days,))
     logger.info(f"Cleaned up {deleted} old jobs")
+    return deleted
+
+
+def cleanup_old_previews(hours: int = 1):
+    """
+    Delete preview sessions older than specified hours
+
+    Args:
+        hours: Number of hours to keep previews (default 1 hour)
+    """
+    query = """
+        DELETE FROM preview_sessions
+        WHERE created_at < datetime('now', '-' || ? || ' hours')
+    """
+    deleted = execute_update(query, (hours,))
+    logger.info(f"Cleaned up {deleted} old preview sessions")
     return deleted

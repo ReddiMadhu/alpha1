@@ -1,6 +1,7 @@
 """Job management API endpoints"""
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Query
 from typing import List, Optional
+from datetime import datetime
 from loguru import logger
 
 from api.models.api_models import (
@@ -11,13 +12,24 @@ from api.models.api_models import (
     JobListItem,
     JobDeleteResponse,
     JobStatus,
-    ErrorResponse
+    ErrorResponse,
+    # Preview models
+    JobPreviewResponse,
+    FilePreview,
+    ColumnPreview,
+    DuplicateGroupInfo,
+    JobConfirmRequest,
+    JobConfirmResponse,
+    PreviewDeleteResponse,
+    FileColumnSelection
 )
-from api.utils import generate_job_id
+from api.utils import generate_job_id, generate_preview_id
 from api.config import config
 from storage.job_store import JobStore
 from storage.file_store import FileStore
 from storage.result_store import ResultStore
+from storage.preview_store import PreviewStore
+from storage.database import get_db_connection
 
 # Import job executor (will create next)
 from workers.job_executor import execute_discovery_job
@@ -28,6 +40,7 @@ router = APIRouter()
 job_store = JobStore()
 file_store = FileStore()
 result_store = ResultStore()
+preview_store = PreviewStore()
 
 
 @router.post("/", response_model=JobCreateResponse, status_code=201)
@@ -342,6 +355,388 @@ async def delete_job(job_id: str):
                 "error": {
                     "code": "DELETE_FAILED",
                     "message": "Failed to delete job",
+                    "details": str(e)
+                }
+            }
+        )
+
+
+# ==================== Preview Endpoints ====================
+
+@router.post("/preview", response_model=JobPreviewResponse, status_code=201)
+async def create_preview(
+    files: List[UploadFile] = File(..., description="Excel files to preview (1-5 files)"),
+):
+    """
+    Upload files for preview and duplicate detection.
+    Returns preview data including column information and duplicate groups.
+    """
+    try:
+        # Validate file count
+        if len(files) < 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": "INVALID_FILE_COUNT",
+                        "message": "At least 1 file is required",
+                        "details": {"min_files": 1}
+                    }
+                }
+            )
+
+        if len(files) > config.MAX_FILES_PER_JOB:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "code": "TOO_MANY_FILES",
+                        "message": f"Maximum {config.MAX_FILES_PER_JOB} files allowed",
+                        "details": {
+                            "max_files": config.MAX_FILES_PER_JOB,
+                            "provided": len(files)
+                        }
+                    }
+                }
+            )
+
+        # Generate preview ID
+        preview_id = generate_preview_id()
+
+        # Create preview session FIRST (for foreign key constraint)
+        preview_store.create_preview_session(
+            preview_id=preview_id,
+            file_count=len(files),
+            total_duplicates_detected=0  # Will update later
+        )
+
+        # Import required modules
+        from src.excel_loader import ExcelLoader
+        from src.duplicate_detector import DuplicateDetector
+        from src.utils.data_types import DataTypeInferrer
+        import pandas as pd
+
+        detector = DuplicateDetector(enable_llm=True)
+
+        file_previews = []
+        total_duplicates = 0
+
+        # Process each file
+        for file in files:
+            # Create fresh loader for each file to avoid state sharing
+            loader = ExcelLoader()
+            # Read file content
+            content = await file.read()
+            file_size = len(content)
+
+            # Validate file
+            is_valid, error_msg = file_store.validate_file(file.filename, file_size)
+            if not is_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "code": "INVALID_FILE",
+                            "message": error_msg,
+                            "details": {"filename": file.filename}
+                        }
+                    }
+                )
+
+            # Load file into DataFrame (sample first 10,000 rows)
+            try:
+                from io import BytesIO
+                import tempfile
+
+                # Save to temp file (close it before pandas reads it on Windows)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                # File is now closed, safe to read with pandas
+
+                # Load DataFrame
+                loaded_files = loader.load_files([tmp_path])
+                df = list(loaded_files.values())[0]
+
+                # Sample first 10,000 rows (make a copy to allow cleanup)
+                df_sample = df.head(10000).copy()
+
+                # Clean up temp file with retry logic for Windows
+                import os
+                import time
+                if os.path.exists(tmp_path):
+                    # Delete references to allow file cleanup
+                    del loaded_files
+
+                    for attempt in range(3):
+                        try:
+                            os.unlink(tmp_path)
+                            break
+                        except (PermissionError, OSError):
+                            if attempt < 2:
+                                import gc
+                                gc.collect()  # Force garbage collection
+                                time.sleep(0.1)  # Wait 100ms and retry
+                            else:
+                                logger.warning(f"Could not delete temp file {tmp_path}, it will be cleaned up later")
+
+            except Exception as e:
+                logger.error(f"Failed to load file {file.filename}: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": {
+                            "code": "FILE_LOAD_ERROR",
+                            "message": f"Failed to load file: {str(e)}",
+                            "details": {"filename": file.filename}
+                        }
+                    }
+                )
+
+            # Detect duplicates
+            duplicate_groups = detector.detect_duplicates(df_sample)
+            total_duplicates += len(duplicate_groups)
+
+            # Create column previews
+            column_previews = []
+            for col in df_sample.columns:
+                non_null = df_sample[col].dropna()
+
+                # Convert sample values to JSON-serializable format
+                sample_values = non_null.head(5).tolist()
+                # Handle pandas Timestamp and other non-serializable types
+                sample_values = [
+                    str(val) if hasattr(val, 'isoformat') or isinstance(val, (pd.Timestamp, datetime))
+                    else val
+                    for val in sample_values
+                ]
+
+                column_preview = ColumnPreview(
+                    name=col,
+                    data_type=DataTypeInferrer.infer_type(df_sample[col]),
+                    null_count=int(df_sample[col].isna().sum()),
+                    unique_count=int(df_sample[col].nunique()),
+                    sample_values=sample_values
+                )
+                column_previews.append(column_preview)
+
+            # Convert duplicate groups to DuplicateGroupInfo
+            duplicate_infos = []
+            for group in duplicate_groups:
+                duplicate_info = DuplicateGroupInfo(
+                    group_id=group.group_id,
+                    detection_type=group.detection_type,
+                    similarity_score=group.similarity_score,
+                    columns=group.columns,
+                    metadata={
+                        "content_identical": group.content_identical,
+                        "sample_comparison": group.sample_comparison,
+                        **group.metadata
+                    },
+                    recommendation=group.recommendation
+                )
+                duplicate_infos.append(duplicate_info)
+
+            # Save preview file with DataFrame and metadata
+            metadata = {
+                "columns": [cp.dict() for cp in column_previews],
+                "duplicate_groups": [di.dict() for di in duplicate_infos]
+            }
+
+            preview_file = preview_store.save_preview_file(
+                preview_id=preview_id,
+                original_filename=file.filename,
+                file_content=content,
+                df=df,  # Save full DataFrame, not just sample
+                metadata=metadata
+            )
+
+            # Create file preview response
+            file_preview = FilePreview(
+                file_id=preview_file.file_id,
+                original_filename=preview_file.original_filename,
+                row_count=preview_file.row_count,
+                column_count=preview_file.column_count,
+                columns=column_previews,
+                duplicate_groups=duplicate_infos
+            )
+            file_previews.append(file_preview)
+
+        # Update preview session with total duplicates count
+        with get_db_connection() as conn:
+            conn.execute(
+                "UPDATE preview_sessions SET total_duplicates_detected = ? WHERE preview_id = ?",
+                (total_duplicates, preview_id)
+            )
+
+        logger.info(f"Created preview {preview_id} with {len(files)} files, {total_duplicates} duplicate groups")
+
+        return JobPreviewResponse(
+            preview_id=preview_id,
+            status="preview_ready",
+            created_at=datetime.utcnow(),
+            file_count=len(files),
+            files=file_previews,
+            total_duplicates_detected=total_duplicates,
+            message="Preview ready. Review duplicate columns before processing."
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create preview: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "PREVIEW_CREATION_FAILED",
+                    "message": "Failed to create preview",
+                    "details": str(e)
+                }
+            }
+        )
+
+
+@router.post("/preview/{preview_id}/confirm", response_model=JobConfirmResponse, status_code=201)
+async def confirm_preview(
+    preview_id: str,
+    request: JobConfirmRequest,
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Confirm preview and start processing with selected columns deleted.
+    """
+    try:
+        # Get preview session
+        session = preview_store.get_preview_session(preview_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": {
+                        "code": "PREVIEW_NOT_FOUND",
+                        "message": f"Preview {preview_id} not found",
+                        "details": {"preview_id": preview_id}
+                    }
+                }
+            )
+
+        # Load DataFrames
+        dataframes = preview_store.load_all_dataframes(preview_id)
+
+        # Apply column deletions
+        columns_removed = 0
+        file_paths = []
+
+        for selection in request.file_selections:
+            if selection.file_id not in dataframes:
+                logger.warning(f"File {selection.file_id} not found in preview")
+                continue
+
+            df = dataframes[selection.file_id]
+
+            # Drop selected columns
+            if selection.columns_to_delete:
+                cols_to_drop = [c for c in selection.columns_to_delete if c in df.columns]
+                df = df.drop(columns=cols_to_drop)
+                columns_removed += len(cols_to_drop)
+                logger.info(f"Dropped {len(cols_to_drop)} columns from {selection.file_id}")
+
+            # Save cleaned DataFrame to a temp file for processing
+            file_path = preview_store.get_file_path(selection.file_id)
+            if file_path:
+                # Overwrite original file with cleaned DataFrame
+                import pandas as pd
+                df.to_excel(file_path, index=False)
+                file_paths.append(file_path)
+
+        # Generate job ID
+        job_id = generate_job_id()
+
+        # Create job in database
+        job = job_store.create_job(job_id=job_id, file_count=len(file_paths))
+
+        # Mark preview as confirmed
+        preview_store.update_session_status(preview_id, "confirmed")
+
+        # Schedule background job with cleaned files
+        background_tasks.add_task(
+            execute_discovery_job,
+            job_id=job_id,
+            file_paths=file_paths
+        )
+
+        # Don't delete preview immediately - let background task handle cleanup
+        # or let scheduled cleanup delete it after 1 hour
+
+        logger.info(f"Confirmed preview {preview_id}, created job {job_id}, removed {columns_removed} columns")
+
+        return JobConfirmResponse(
+            job_id=job_id,
+            status=JobStatus.RUNNING,
+            created_at=datetime.utcnow(),
+            file_count=len(file_paths),
+            columns_removed=columns_removed,
+            message="Job created successfully and processing started"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to confirm preview: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "PREVIEW_CONFIRM_FAILED",
+                    "message": "Failed to confirm preview",
+                    "details": str(e)
+                }
+            }
+        )
+
+
+@router.delete("/preview/{preview_id}", response_model=PreviewDeleteResponse)
+async def cancel_preview(preview_id: str):
+    """
+    Cancel a preview and delete all associated files.
+    """
+    try:
+        # Check if preview exists
+        session = preview_store.get_preview_session(preview_id)
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": {
+                        "code": "PREVIEW_NOT_FOUND",
+                        "message": f"Preview {preview_id} not found",
+                        "details": {"preview_id": preview_id}
+                    }
+                }
+            )
+
+        # Delete preview
+        files_deleted = preview_store.delete_preview(preview_id)
+
+        logger.info(f"Cancelled preview {preview_id}")
+
+        return PreviewDeleteResponse(
+            message=f"Preview {preview_id} cancelled and files deleted",
+            preview_id=preview_id,
+            files_deleted=files_deleted
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel preview {preview_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "PREVIEW_DELETE_FAILED",
+                    "message": "Failed to cancel preview",
                     "details": str(e)
                 }
             }
