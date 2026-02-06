@@ -239,6 +239,13 @@ class DuplicateDetector:
                 similarity = self._calculate_content_similarity(df[col1], df[col2])
 
                 if similarity >= threshold:
+                    # IMPORTANT: Check if column names are semantically related
+                    # to avoid false positives like "record_id" vs "Agent_ID"
+                    # or "total_calls" vs "inbound_calls"
+                    if not self._are_column_names_semantically_similar(col1, col2):
+                        logger.debug(f"Skipping {col1} vs {col2}: high content similarity ({similarity:.2%}) but semantically different names")
+                        continue
+
                     if col2 not in similar_cols:
                         similar_cols.append(col2)
 
@@ -269,6 +276,90 @@ class DuplicateDetector:
 
         logger.debug(f"Content similarity: Found {len(groups)} duplicate groups")
         return groups
+
+    def _are_column_names_semantically_similar(self, col1: str, col2: str) -> bool:
+        """
+        Check if two column names are semantically similar enough to be considered duplicates.
+
+        This prevents false positives like:
+        - "record_id" vs "Agent_ID" (different entity types)
+        - "total_calls" vs "inbound_calls" (different metrics)
+        - "CustomerID" vs "OrderID" (different business entities)
+
+        Returns:
+            True if names are semantically similar (likely duplicates)
+            False if names are semantically different (likely NOT duplicates)
+        """
+        # Normalize names
+        name1 = normalize_column_name(col1)
+        name2 = normalize_column_name(col2)
+
+        # Calculate name similarity using Levenshtein distance
+        name_similarity = SequenceMatcher(None, name1, name2).ratio()
+
+        # If names are very similar (>70%), they're likely duplicates
+        # e.g., "mistake_id" vs "mistakeid", "CustomerName" vs "customer_name"
+        if name_similarity >= 0.70:
+            return True
+
+        # Extract key words from column names (split by underscore, camelCase, etc.)
+        words1 = set(self._extract_column_name_words(col1))
+        words2 = set(self._extract_column_name_words(col2))
+
+        # Check word overlap
+        common_words = words1.intersection(words2)
+        total_words = words1.union(words2)
+
+        if not total_words:
+            return False
+
+        word_overlap = len(common_words) / len(total_words)
+
+        # If they share significant words, they might be related
+        # e.g., "total_calls" and "inbound_calls" share "calls"
+        # BUT we need to check if they have DIFFERENT qualifiers
+        unique_words1 = words1 - words2
+        unique_words2 = words2 - words1
+
+        # Define words that indicate different metrics/entities
+        differentiating_words = {
+            'total', 'sum', 'count', 'avg', 'average', 'mean', 'median', 'min', 'max',
+            'inbound', 'outbound', 'incoming', 'outgoing',
+            'first', 'last', 'start', 'end', 'begin', 'final',
+            'primary', 'secondary', 'tertiary',
+            'source', 'target', 'destination',
+            'customer', 'agent', 'user', 'record', 'order', 'product', 'invoice',
+            'id', 'identifier', 'code', 'key', 'number'
+        }
+
+        # If one has a differentiating word that the other doesn't, they're different
+        for word in unique_words1:
+            if word.lower() in differentiating_words:
+                logger.debug(f"'{col1}' vs '{col2}': Different metrics detected ('{word}')")
+                return False
+
+        for word in unique_words2:
+            if word.lower() in differentiating_words:
+                logger.debug(f"'{col1}' vs '{col2}': Different metrics detected ('{word}')")
+                return False
+
+        # If word overlap is high (>50%) and no differentiating words, likely duplicates
+        return word_overlap >= 0.5
+
+    def _extract_column_name_words(self, column_name: str) -> List[str]:
+        """Extract individual words from column name (handles snake_case, camelCase, etc.)"""
+        # Split by underscores and spaces
+        words = re.split(r'[_\s]+', column_name)
+
+        # Split camelCase (e.g., "CustomerID" -> ["Customer", "ID"])
+        all_words = []
+        for word in words:
+            # Insert space before uppercase letters (camelCase splitting)
+            spaced = re.sub(r'([a-z])([A-Z])', r'\1 \2', word)
+            all_words.extend(spaced.split())
+
+        # Filter out empty strings and normalize
+        return [w.lower() for w in all_words if w and len(w) > 1]
 
     def _detect_llm_semantic_with_overlap(
         self,
