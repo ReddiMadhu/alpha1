@@ -119,10 +119,16 @@ class DuplicateDetector:
         # Find groups with duplicates
         for normalized_name, columns in name_groups.items():
             if len(columns) > 1:
-                group_id = f"dup_exact_{len(groups) + 1}"
-
-                # Check content similarity
+                # IMPORTANT: Only flag as duplicate if content is also similar
+                # Check if at least some columns have identical content
                 content_identical = self._check_content_identical(df, columns)
+
+                # Skip if ALL content is different (no identical pairs)
+                if not any(content_identical):
+                    logger.debug(f"Skipping exact name match for {columns}: same names but ALL content is different")
+                    continue
+
+                group_id = f"dup_exact_{len(groups) + 1}"
 
                 # Get sample values
                 sample_comparison = self._get_sample_comparison(df, columns)
@@ -180,10 +186,15 @@ class DuplicateDetector:
                 all_cols.extend([c for c in columns if c != base_name])
 
                 if len(all_cols) > 1:
-                    group_id = f"dup_suffix_{len(groups) + 1}"
-
-                    # Check content similarity
+                    # IMPORTANT: Only flag as duplicate if content is also similar
                     content_identical = self._check_content_identical(df, all_cols)
+
+                    # Skip if ALL content is different
+                    if not any(content_identical):
+                        logger.debug(f"Skipping suffix pattern for {all_cols}: same base name but ALL content is different")
+                        continue
+
+                    group_id = f"dup_suffix_{len(groups) + 1}"
 
                     # Get sample values
                     sample_comparison = self._get_sample_comparison(df, all_cols)
@@ -525,10 +536,15 @@ class DuplicateDetector:
                         similar_cols.append(col2)
 
             if len(similar_cols) > 1:
-                group_id = f"dup_fuzzy_{len(groups) + 1}"
-
-                # Check content identical
+                # IMPORTANT: Only flag as duplicate if content is also similar
                 content_identical = self._check_content_identical(df, similar_cols)
+
+                # Skip if ALL content is different
+                if not any(content_identical):
+                    logger.debug(f"Skipping fuzzy name match for {similar_cols}: similar names but ALL content is different")
+                    continue
+
+                group_id = f"dup_fuzzy_{len(groups) + 1}"
 
                 # Get sample values
                 sample_comparison = self._get_sample_comparison(df, similar_cols)
@@ -718,12 +734,19 @@ Consider:
 
         # Check if both are numeric
         if pd.api.types.is_numeric_dtype(s1_aligned) and pd.api.types.is_numeric_dtype(s2_aligned):
-            # Use Pearson correlation for numeric columns
-            try:
-                correlation = s1_aligned.corr(s2_aligned)
-                return abs(correlation) if not np.isnan(correlation) else 0.0
-            except:
-                pass
+            # IMPORTANT: Use value matching, NOT correlation
+            # Correlation can show high similarity for columns with DIFFERENT values
+            # (e.g., inbound_calls=[75,34,46] vs outbound_calls=[12,14,19] might correlate)
+
+            # Instead, check how many values are actually identical or very close
+            # For exact duplicates, we want the actual values to match
+            matches = 0
+            for v1, v2 in zip(s1_aligned, s2_aligned):
+                # Consider values matching if they're equal or within 0.1% tolerance
+                if abs(v1 - v2) < 0.001 * max(abs(v1), abs(v2), 1):
+                    matches += 1
+
+            return matches / len(s1_aligned)
 
         # For string/object columns, use Jaccard similarity
         set1 = set(s1_aligned.astype(str))
