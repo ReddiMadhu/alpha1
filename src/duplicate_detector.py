@@ -79,6 +79,13 @@ class DuplicateDetector:
         content_dupes = self._detect_content_similarity(df_sample, processed_columns)
         all_duplicates.extend(content_dupes)
 
+        # Algorithm 3.5: LLM Semantic + Overlap (NEW - high confidence duplicates)
+        if self.enable_llm and self.llm_reasoner and self.llm_reasoner.llm:
+            from src.config import Config
+            if Config.ENABLE_SEMANTIC_DUPLICATE_DETECTION:
+                semantic_overlap_dupes = self._detect_llm_semantic_with_overlap(df_sample, processed_columns)
+                all_duplicates.extend(semantic_overlap_dupes)
+
         # Algorithm 4: Fuzzy name match
         fuzzy_dupes = self._detect_fuzzy_name_matches(df_sample, processed_columns)
         all_duplicates.extend(fuzzy_dupes)
@@ -262,6 +269,135 @@ class DuplicateDetector:
 
         logger.debug(f"Content similarity: Found {len(groups)} duplicate groups")
         return groups
+
+    def _detect_llm_semantic_with_overlap(
+        self,
+        df: pd.DataFrame,
+        processed_columns: set
+    ) -> List[DuplicateGroup]:
+        """
+        Detect semantically duplicate columns using LLM + overlap threshold.
+
+        This is the NEW semantic duplicate detection that combines:
+        - Same/compatible data types
+        - High value overlap (>= 80%)
+        - LLM semantic validation
+
+        Args:
+            df: DataFrame to analyze
+            processed_columns: Set of already processed column names
+
+        Returns:
+            List of DuplicateGroup objects
+        """
+        from src.config import Config
+
+        groups = []
+        remaining_cols = [col for col in df.columns if col not in processed_columns]
+
+        if len(remaining_cols) < 2:
+            return groups
+
+        logger.debug(f"LLM semantic overlap: Checking {len(remaining_cols)} columns")
+
+        # Group columns by compatible data types
+        type_groups = self._group_by_compatible_types(df, remaining_cols)
+
+        for type_name, cols in type_groups.items():
+            if len(cols) < 2:
+                continue
+
+            # Check all pairs in this type group
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    col1, col2 = cols[i], cols[j]
+
+                    # Calculate value overlap
+                    overlap_percent = self._calculate_content_similarity(
+                        df[col1], df[col2]
+                    )
+
+                    # Only proceed if overlap meets threshold
+                    if overlap_percent < Config.SEMANTIC_DUPLICATE_MIN_OVERLAP:
+                        continue
+
+                    # Prepare data for LLM
+                    col1_data = {
+                        'name': col1,
+                        'data_type': str(df[col1].dtype),
+                        'samples': df[col1].dropna().head(10).tolist(),
+                        'overlap_percent': overlap_percent * 100
+                    }
+
+                    col2_data = {
+                        'name': col2,
+                        'data_type': str(df[col2].dtype),
+                        'samples': df[col2].dropna().head(10).tolist()
+                    }
+
+                    # Call LLM to check semantic match
+                    llm_result = self.llm_reasoner.check_semantic_duplicate(
+                        col1_data, col2_data
+                    )
+
+                    # Check if LLM confirms semantic match with high confidence
+                    if (llm_result.get('semantic_match', False) and
+                        llm_result.get('confidence', 0) >= Config.SEMANTIC_DUPLICATE_MIN_CONFIDENCE * 100):
+
+                        # Calculate combined similarity score
+                        similarity_score = (overlap_percent * 100 + llm_result['confidence']) / 2
+
+                        # Check content identity
+                        are_identical = self._check_exact_content_match(df[col1], df[col2])
+
+                        group = DuplicateGroup(
+                            group_id=f"dup_semantic_overlap_{len(groups) + 1}",
+                            detection_type="semantic_overlap",
+                            similarity_score=similarity_score,
+                            columns=[col1, col2],
+                            content_identical=[True, are_identical],
+                            sample_comparison={
+                                col1: df[col1].dropna().head(5).tolist(),
+                                col2: df[col2].dropna().head(5).tolist()
+                            },
+                            recommendation=llm_result.get('recommendation', 'Keep first, review second'),
+                            metadata={
+                                'llm_reasoning': llm_result.get('reasoning', ''),
+                                'overlap_percent': overlap_percent * 100,
+                                'llm_confidence': llm_result['confidence']
+                            }
+                        )
+
+                        groups.append(group)
+                        processed_columns.update([col1, col2])
+
+                        logger.info(f"Semantic duplicate found: {col1} <-> {col2} (overlap: {overlap_percent*100:.1f}%, LLM confidence: {llm_result['confidence']}%)")
+
+        logger.debug(f"LLM semantic overlap: Found {len(groups)} duplicate groups")
+        return groups
+
+    def _group_by_compatible_types(
+        self,
+        df: pd.DataFrame,
+        columns: List[str]
+    ) -> Dict[str, List[str]]:
+        """Group columns by compatible data types to reduce unnecessary LLM calls."""
+        type_groups = defaultdict(list)
+
+        for col in columns:
+            dtype = df[col].dtype
+
+            # Categorize into broad type groups
+            if pd.api.types.is_numeric_dtype(dtype):
+                type_groups['numeric'].append(col)
+            elif pd.api.types.is_string_dtype(dtype) or pd.api.types.is_object_dtype(dtype):
+                type_groups['string'].append(col)
+            elif pd.api.types.is_datetime64_any_dtype(dtype):
+                type_groups['datetime'].append(col)
+            else:
+                type_groups['other'].append(col)
+
+        return dict(type_groups)
 
     def _detect_fuzzy_name_matches(
         self,

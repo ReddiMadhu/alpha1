@@ -92,7 +92,12 @@ class Config:
     
     # Enable LLM validation (set to False to disable LLM entirely)
     ENABLE_LLM_VALIDATION: bool = os.getenv("ENABLE_LLM_VALIDATION", "true").lower() == "true"
-    
+
+    # Semantic duplicate detection thresholds
+    SEMANTIC_DUPLICATE_MIN_OVERLAP: float = 0.80  # 80% value overlap required
+    SEMANTIC_DUPLICATE_MIN_CONFIDENCE: float = 0.80  # 80% LLM confidence required
+    ENABLE_SEMANTIC_DUPLICATE_DETECTION: bool = os.getenv("ENABLE_SEMANTIC_DUPLICATE_DETECTION", "true").lower() == "true"
+
     # =============================================================================
     # PERFORMANCE - OPTIMIZED FOR MAX 5 FILES
     # =============================================================================

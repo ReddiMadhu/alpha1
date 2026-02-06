@@ -147,7 +147,75 @@ Respond ONLY with valid JSON in this EXACT format (no markdown, no code blocks):
             "warnings": ["LLM unavailable, using deterministic rules only"],
             "transformation_needed": None
         }
-    
+
+    def check_semantic_duplicate(self, col1_data: Dict[str, Any], col2_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Check if two columns are semantically duplicate using LLM.
+
+        Args:
+            col1_data: Dictionary with keys: name, data_type, samples, overlap_percent
+            col2_data: Dictionary with keys: name, data_type, samples
+
+        Returns:
+            Dictionary with semantic_match, confidence, reasoning, recommendation
+        """
+        if not self.llm:
+            return self._get_semantic_fallback("LLM not initialized")
+
+        try:
+            # Build prompt
+            prompt = f"""Analyze if these two columns represent the SAME semantic concept:
+
+Column 1: '{col1_data['name']}' (type: {col1_data['data_type']})
+Sample values: {col1_data['samples'][:10]}
+
+Column 2: '{col2_data['name']}' (type: {col2_data['data_type']})
+Sample values: {col2_data['samples'][:10]}
+
+Data Overlap: {col1_data.get('overlap_percent', 0):.1f}%
+
+Consider:
+1. Do they represent the same business entity/attribute?
+2. Are the sample values semantically equivalent?
+3. Would keeping both columns create redundancy?
+
+Respond ONLY with valid JSON (no markdown, no code blocks):
+{{
+  "semantic_match": true or false,
+  "confidence": 0-100,
+  "reasoning": "brief explanation",
+  "recommendation": "keep first" or "keep second" or "keep both"
+}}"""
+
+            # Call LLM
+            response = self.llm.invoke(prompt)
+
+            if not response or not response.content:
+                return self._get_semantic_fallback("Empty LLM response")
+
+            # Parse JSON response
+            result = json.loads(response.content.strip())
+
+            logger.debug(f"Semantic duplicate check: {col1_data['name']} vs {col2_data['name']} = {result['semantic_match']} ({result['confidence']}%)")
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse LLM response: {e}")
+            return self._get_semantic_fallback("Invalid JSON response")
+        except Exception as e:
+            logger.error(f"Semantic duplicate check failed: {e}")
+            return self._get_semantic_fallback(str(e))
+
+    def _get_semantic_fallback(self, reason: str) -> Dict[str, Any]:
+        """Return fallback response when LLM is unavailable for semantic checking."""
+        return {
+            "semantic_match": False,
+            "confidence": 0,
+            "reasoning": f"LLM unavailable: {reason}",
+            "recommendation": "keep both"
+        }
+
     def test_connection(self) -> bool:
         """
         Test connection to Azure OpenAI.

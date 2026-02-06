@@ -745,3 +745,94 @@ async def cancel_preview(preview_id: str):
 
 # Import JSONResponse for 202 status
 from fastapi.responses import JSONResponse
+
+
+@router.delete("/{job_id}/relationships/{relationship_id}")
+async def delete_relationship(
+    job_id: str,
+    relationship_id: str
+):
+    """
+    Delete a specific relationship from job results.
+
+    This is a soft delete - marks the relationship as deleted in the result JSON.
+    The relationship will be filtered out from future API responses.
+
+    Args:
+        job_id: The job ID
+        relationship_id: The relationship ID to delete
+
+    Returns:
+        Success response with remaining relationship count
+    """
+    try:
+        # Load job result
+        result_data = result_store.get_result(job_id)
+
+        if not result_data:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": {
+                        "code": "JOB_NOT_FOUND",
+                        "message": f"Job {job_id} not found",
+                        "details": {"job_id": job_id}
+                    }
+                }
+            )
+
+        # Find and mark relationship as deleted
+        relationships = result_data.get("result", {}).get("relationships", [])
+        found = False
+
+        for rel in relationships:
+            if rel.get("relationship_id") == relationship_id:
+                rel["deleted"] = True
+                rel["deleted_at"] = datetime.now().isoformat()
+                found = True
+                break
+
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": {
+                        "code": "RELATIONSHIP_NOT_FOUND",
+                        "message": f"Relationship {relationship_id} not found in job {job_id}",
+                        "details": {
+                            "job_id": job_id,
+                            "relationship_id": relationship_id
+                        }
+                    }
+                }
+            )
+
+        # Update result in storage
+        result_store.update_result(job_id, result_data)
+
+        # Count remaining active relationships
+        active_count = sum(1 for r in relationships if not r.get("deleted", False))
+
+        logger.info(f"Deleted relationship {relationship_id} from job {job_id}. {active_count} relationships remaining.")
+
+        return {
+            "success": True,
+            "relationship_id": relationship_id,
+            "remaining_relationships": active_count,
+            "message": "Relationship deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete relationship {relationship_id} from job {job_id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "DELETE_RELATIONSHIP_FAILED",
+                    "message": "Failed to delete relationship",
+                    "details": str(e)
+                }
+            }
+        )
